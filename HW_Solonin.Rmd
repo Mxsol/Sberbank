@@ -1,0 +1,483 @@
+---
+title: "Homework Sberbank"
+author: "Solonin Maxim"
+date: "19 12 2016"
+output: html_document
+---
+
+# Домашняя работа Сбербанк
+
+```{r, error=FALSE, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+library("readr")
+transaction_train<-read_csv("~/shared/minor3_2016/data/sber/transaction_train.csv")
+transaction_predict<-read_csv("~/shared/minor3_2016/data/sber/transaction_predict.csv")
+gender_train<-read_csv("~/shared/minor3_2016/data/sber/gender_train.csv")
+gender_predict<-read_csv("~/shared/minor3_2016/data/sber/gender_predict.csv")
+mcc<-read.csv("~/shared/minor3_2016/data/sber/tr_mcc_codes.csv", sep = ";")
+types<-read.csv("~/shared/minor3_2016/data/sber/tr_types.csv", sep = ";")
+library(ggplot2)
+library(GGally)
+```
+
+
+## Разведочный анализ данных
+
+Сначала необходимо взглянуть на данные, что они в себе содержат.
+Основные данные представляют из себя историю банковских транзакций, а также демографическую информацию (пол) по некоторой выборке клиентов. В ходе анализа будут даны ответы на несколько вопросов по текущему датасету, а также построены несколько моделей, которые предсказывают пол клиента по его банковским операциям (транзакциям). Модель, демонстрирующая лучшие результаты, будет использована для предсказания пола 3000 клиентов из независимой выборки.
+
+-------------------------------------------------------------------
+ customer_id   tr_datetime   mcc_code   tr_type   amount   term_id 
+------------- ------------- ---------- --------- -------- ---------
+  39026145     0 10:23:26      4814      1030      -100      NA    
+
+  39026145     1 10:19:29      6011      7010      2500      NA    
+
+  39026145     1 10:20:56      4829      2330     -2500      NA    
+
+  39026145     1 10:39:54      5499      1010      -62       NA    
+
+  39026145     2 15:33:42      5499      1010      -41       NA    
+
+  39026145     2 15:53:49      5541      1010      -652      NA    
+-------------------------------------------------------------------
+
+----------------------
+ customer_id   gender 
+------------- --------
+  83810118       0    
+
+  44338675       0    
+
+  85577609       0    
+
+  74944537       0    
+
+   9118054       0    
+
+  70473209       1    
+----------------------
+
+```{r, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+#Что вы можете сказать про данные? 
+pander::pandoc.table(head(transaction_train))
+pander::pandoc.table(head(gender_train))
+library(tidyr)
+transaction_train<-separate(transaction_train, col=tr_datetime, into=c("day", "time"), sep=" ")
+transaction_train$day<-as.integer(transaction_train$day)
+library(lubridate)
+dateInitial = dmy("01-01-2015")
+transaction_train$date <- dateInitial + ddays(transaction_train$day-153)
+library(dplyr)
+```
+
+
+Мы посмотрели на основные данные, которые будем использовать, также есть вспомогательная информация, описывающая mcc-коды транзакций и тип банковской транзакции.
+
+-----------------------------------------
+ mcc_code         mcc_description        
+---------- ------------------------------
+   742          Ветеринарные услуги      
+
+   1711      Генеральные подрядчики по   
+           вентиляции, теплоснабжению, и 
+                    водопроводу          
+
+   1731     Подрядчики по электричеству  
+
+   1799    Подрядчики, специализированная
+             торговля — нигде более не   
+                 классифицированные      
+
+   2741            Разнообразные         
+             издательства/печатное дело  
+
+   3000       Авиалинии, авиакомпании    
+-----------------------------------------
+
+
+----------------------------------------
+ tr_type          tr_description        
+--------- ------------------------------
+  3200    Плата за предоставление услуг 
+           посредством мобильной связи  
+
+  3210    Плата за предоставление отчета
+              по счету карты почтой     
+
+  3800        Плата за обслуживание     
+           банковской карты (за первый  
+                       год)             
+
+  4000    Плата за получение наличных в 
+                    Сбербанке           
+----------------------------------------
+
+```{r, echo=FALSE, warning=FALSE}
+trans<-dplyr::group_by(transaction_train, customer_id)%>%summarise(sum = sum(amount))
+trans<-left_join(trans, gender_train, by = "customer_id")
+transact_num<-dplyr::group_by(transaction_train, customer_id)%>% summarize(count=n())
+trans<-left_join(trans,transact_num, by = "customer_id" )
+```
+Теперь рассмотрим базовые закономерности в данных.
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+ggplot(trans) + geom_bar(aes(x = factor(gender)))+xlab("Пол клиента")+ylab("Количество клиентов")
+
+mcc_cod<-dplyr::group_by(transaction_train, mcc_code)  %>% summarize(count=n())
+mcct<-left_join(mcc, mcc_cod, by = "mcc_code")
+```
+```{r, include=FALSE}
+library(caret)
+mcct<-mcct %>% arrange(desc(count))
+pander::pandoc.table(head(mcct, n = 10))
+```
+
+Так, из 3000 клиентов в наших данных 1688 - женщины и 1312 - мужчины.
+В основном пол клиента можно определить по описанию mcc-кода транзакции, потому что это может сообщить о деятельности человека - ходит он в салон красоты, покупает снегоход и т.д. Выделим самые популярные виды операций: 
+
+------------------------------------------------
+ mcc_code         mcc_description         count 
+---------- ----------------------------- -------
+   6011    Финансовые институты — снятие 290727 
+             наличности автоматически           
+
+   6010    Финансовые институты — снятие 289252 
+                наличности вручную              
+
+   4814       Звонки с использованием    199714 
+              телефонов, считывающих            
+                  магнитную ленту               
+
+   5411        Бакалейные магазины,      191430 
+                   супермаркеты                 
+
+   4829          Денежные переводы       123259 
+
+   5499     Различные продовольственные   68422 
+           магазины — рынки, магазины со        
+            спец-ассортиментом, продажа         
+             полуфабрикатов, фирменных          
+              блюд, продажа с помощью           
+                торговых автоматов              
+
+   5541       Станции техобслуживания     27020 
+
+   5912               Аптеки              25551 
+
+   5331       Универсальные магазины      25113 
+
+   5812    Места общественного питания,   21946 
+                     рестораны                  
+------------------------------------------------
+
+Можно заметить, что в 10 самых популярных видах транзакций нет, на мой взгляд, ничего явно классифицируещего клиентов по полу. Таким образом, самые популярные виды транзакций не помогут сделать вывод о поле клиента.
+
+Что касается доходов и расходов, стоит отметить, что в данной выборке клиенты больше тратят, чем получают дохода.
+
+
+
+Посмотрим, существуют ли какие-то временные паттерны в транзакциях. По совету 153 день задается как 1 января 2015. Интересно, как это было определено. Построим график, показывающий количество транзакций по каждому дню из массива данных.
+
+```{r, echo=FALSE}
+td <- transaction_train %>% group_by(day) %>% summarise(count = n())
+ggplot(data=td, aes(x=day, y=count)) +
+geom_bar(stat="identity", position=position_dodge(), colour="blue") +
+ggtitle("Количество транзакций по дням в году") +
+ylab("Число банковских транзакций") + 
+xlab("Номер дня")
+```
+
+Очень заметен сильный спад количества транзакций 1 раз за эти 457 дней. Можно догадаться, что это как раз тот самый 153 день, но по этому графику точный номер дня не увидеть, посмотрим поближе.
+
+```{r,echo=FALSE}
+tdcut<-filter(td, day>139 ,day<170)
+ggplot(data=tdcut, aes(x=day, y=count)) +
+geom_bar(stat="identity", position=position_dodge(), colour="blue") +
+ggtitle("Количество транзакций по дням в году") +
+ylab("Число банковских транзакций") + 
+xlab("Номер дня")
+```
+
+Так и оказалось, 153 день демонстрирует минимальное количество банковских транзакций, что может быть непосредственно связано с закрытыми отделениями Сбербанка, большинства магазинов, а также празднование людьми Нового Года. Таким образом, можно определить, что 153 день соответствует 1 января.
+
+Заметно, что количество транзакций колеблется с определенным периодом. Интересно посмотреть, есть ли этому какое-то объяснение. Поскольку просматривается цикличность, напоминающая недельную, построим графики количества транзакций по дням недели. Сначала возьмем отдельный месяц.
+
+```{r, echo=FALSE}
+td30 <- filter(transaction_train, day<30, amount > 0)
+td30$weekday = wday(td30$date)
+ggplot()+geom_bar(data=td30, aes(x=weekday))+xlab("День Недели")+ylab("Количество транзакций")
+```
+
+Оказывается, что в первый месяц наших данных больше всего транзакций совершалось в субботу. Посмотрим, подтвердится ли это на всем массиве данных.
+
+```{r, echo=FALSE}
+tdall<-transaction_train
+tdall$weekday = wday(tdall$date)
+ggplot()+geom_bar(data=tdall, aes(x=weekday))+xlab("День Недели")+ylab("Количество транзакций")
+```
+
+Так и оказалось. В течение 457 дней, которые есть у нас в массиве, клиенты чаще всего совершали транзакции по субботам. Это можно объяснить тем, что в субботу у многих людей выходной и есть время на совершение различных транзакций.
+
+Посмотрим, есть ли какой-нибудь паттерн по месяцам.
+```{r, echo=FALSE}
+tdall$month = month(tdall$date)
+ggplot()+geom_bar(data=tdall, aes(x=factor(month)))+xlab("Месяц")+ylab("Количество транзакций")
+```
+
+Может показаться, что люди совершают больше транзакций с августа по октябрь. Однако, это всего лишь особенность наших данных, они начались с августа 2014 и закончились в конце октября 2015. Следовательно, в данных дважды встречаются эти 3 месяца и нет ничего удивительного в таком разбросе.
+
+
+## Предсказание пола клиента по банковским операциям
+
+Сначала отформатируем датасет, чтобы он был пригоден для предсказания пола клиентов.
+
+```{r, echo=FALSE}
+tr <- inner_join(transaction_train, gender_train, by = "customer_id")
+tr$gender <- as.factor(tr$gender)
+
+tr_n <- tr[,c(1,4,9)]
+
+tr_n$mcc_code <- as.factor(tr_n$mcc_code) 
+tr_n  <- dplyr::group_by(tr_n, customer_id, mcc_code, gender) %>% dplyr::summarize(n = n())
+tr2<- spread(tr_n, key = mcc_code, value = n)
+tr2 <- tr2[,-(1)]
+tr2[is.na(tr2)] <- 0
+tr2$gender <- as.character(tr2$gender)
+tr2$gender[tr2$gender == "0"] <- "f"
+tr2$gender[tr2$gender == "1"] <- "m"
+tr2$gender <- as.factor(tr2$gender)
+```
+
+После этого разделим тренировочный массив на обучающую и тестовую выборки в соотношении 80 к 20 и построим дерево для предсказаний.
+
+```{r, echo=FALSE}
+set.seed(70)
+tr.test.ind = sample(seq_len(nrow(tr2)), size = nrow(tr2)*0.2)
+trt = tr2[tr.test.ind,]
+trm = tr2[-tr.test.ind,]
+
+library(rpart)
+tree.trm=rpart(gender~.-gender,trm)
+rpart.plot::prp(tree.trm, type = 0, extra = 6)
+```
+
+Построенное дерево предсказывает пол клиентов и показывает вероятность с которой клиент, попавший в определенную вершину дерева, окажется мужчиной.
+
+```{r, echo=FALSE, results='hide'}
+rpartPred <- predict(tree.trm, trm, type = "class")
+confusionMatrix(rpartPred,trm$gender)
+cm<-confusionMatrix(rpartPred,trm$gender)
+cm$overall
+```
+
+------------------------------------------
+ Accuracy   AccuracyLower   AccuracyUpper  
+---------- --------------- --------------- 
+  0.7204        0.702          0.7383        
+------------------------------------------
+
+Общая точность модели на обучающей выборке 0.72, что достаточно неплохо.
+Проверим, как наша модель работает на тестовой выборке.
+
+```{r, echo=FALSE, results='hide'}
+testPred<-predict(tree.trm, trt, type = "class")
+confusionMatrix(testPred,trt$gender)
+cm<-confusionMatrix(testPred,trt$gender)
+cm$overall
+```
+------------------------------------------
+ Accuracy   AccuracyLower   AccuracyUpper  
+---------- --------------- --------------- 
+  0.695        0.6564          0.7316        
+------------------------------------------
+
+Точность немного снизилась, теперь она равна 0.695.
+
+Теперь используем другой метод для предсказания пола - метод опорных векторов.
+
+```{r, echo=FALSE, results='hide'}
+library("e1071")
+svm_model <- svm(gender ~ ., data=trm, kernel="linear")
+svm.Pred<-predict(svm_model, trm, probability=FALSE)
+cm<-confusionMatrix(svm.Pred,trm$gender)
+svm.tPred<-predict(svm_model, trt, probability=FALSE)
+cm<-confusionMatrix(svm.tPred,trt$gender)
+```
+
+-------------------------------------------
+ Accuracy   AccuracyLower   AccuracyUpper   
+---------- --------------- ---------------- 
+  0.7937        0.777          0.8098           
+-------------------------------------------
+
+Метод опорных векторов показал лучшую точность по сравнению с деревом решений. Однако, при проверке на тестовой выборке разница оказалась не столь значительна.
+
+------------------------------------------
+ Accuracy   AccuracyLower   AccuracyUpper   
+---------- --------------- --------------- 
+  0.6983      0.6599          0.7348        
+------------------------------------------
+
+Теперь попробуем убрать топ-12 транзакций, которые являются достаточно общими для клиентов обоих полов, а также 4 самые редкие, которые несильно помогут в предсказании пола.
+
+```{r, echo=FALSE}
+tr3<-dplyr::select(tr2,-`5814`,-`5999`,-`5311` -`5812`,-`5331`, -`5912`,-`5541`,- `5499`, -`4829`,-`5411`,-`4814`, -`6010`, -`6011`, -`9211`,-`8220`,-`5965`,-`6513`,-`5697`-`7629`,-`2741`)
+```
+
+```{r, echo=FALSE}
+set.seed(70)
+tr.test.ind3 = sample(seq_len(nrow(tr3)), size = nrow(tr3)*0.2)
+trt3 = tr3[tr.test.ind3,]
+trm3 = tr3[-tr.test.ind3,]
+```
+```{r, echo=FALSE}
+library(rpart)
+tree.trm3=rpart(gender~.-gender,trm3)
+rpart.plot::prp(tree.trm3, type = 0, extra = 6)
+```
+
+Посмотрим на точность предсказания этого дерева.
+```{r, eval=FALSE, include=FALSE, results='hide'}
+rpartPred3 <- predict(tree.trm3, trm3, type = "class")
+confusionMatrix(rpartPred3,trm3$gender)
+cm<-confusionMatrix(rpartPred3,trm3$gender)
+cm$overall
+```
+На обучающей выборке:
+
+------------------------------------------
+ Accuracy   AccuracyLower   AccuracyUpper  
+---------- --------------- --------------- 
+  0.7096         0.691          0.7277          
+------------------------------------------
+
+```{r, eval=FALSE, include=FALSE, results='hide'}
+testPred3<-predict(tree.trm3, trt3, type = "class")
+confusionMatrix(testPred3,trt3$gender)
+cm<-confusionMatrix(testPred3,trt3$gender)
+cm$overall
+```
+На тестовой:
+
+------------------------------------------
+ Accuracy   AccuracyLower   AccuracyUpper 
+---------- --------------- --------------- 
+  0.6633       0.624          0.7011           
+------------------------------------------
+
+Таким образом, это дерево предсказывает хуже, чем дерево со всеми mcc-кодами.
+
+Теперь проанализируем этот массив с помощью метода опорных векторов.
+```{r, include=FALSE}
+svm_model3 <- svm(gender ~ ., data=trm3, kernel="linear")
+svm.Pred3<-predict(svm_model3, trm3, probability=FALSE)
+cm<-confusionMatrix(svm.Pred3,trm3$gender)
+svm.tPred3<-predict(svm_model3, trt3, probability=FALSE)
+cm<-confusionMatrix(svm.tPred3,trt3$gender)
+
+```
+
+-----------------------------------------
+ Accuracy   AccuracyLower   AccuracyUpper 
+---------- --------------- --------------
+  0.7704      0.7531          0.7871     
+-----------------------------------------
+
+Данная модель лучше обоих деревьев решений, однако уступает по точности методу опорных векторов по всем переменным. Проверим ее на тестовой выборке.
+
+------------------------------------------
+ Accuracy   AccuracyLower   AccuracyUpper  
+---------- --------------- --------------- 
+  0.6917       0.653          0.7284        
+------------------------------------------
+
+Таким образом, точность получилась ниже в сравнении с моделью со всеми переменными.
+
+Используем метод главных компонент, чтобы снизить размерность.
+
+```{r,echo=FALSE, eval=FALSE, include=FALSE}
+preprocessParams <- preProcess(trm, method=c("center", "scale", "pca"))
+transformed.main <- predict(preprocessParams, trm)
+transformed.test <- predict(preprocessParams, trt)
+svm_modelpca <- svm(gender~., data = transformed.main)
+svm.Predpca<-predict(svm_modelpca, transformed.main, probability=FALSE)
+cm<-confusionMatrix(svm.Predpca,transformed.main$gender)
+svm.Predpcat<-predict(svm_modelpca, transformed.test, probability=FALSE)
+cm<-confusionMatrix(svm.Predpcat,transformed.test$gender)
+```
+Результат на обучающей:
+
+-----------------------------------------------------------------
+ Accuracy   Kappa   AccuracyLower   AccuracyUpper   AccuracyNull 
+---------- ------- --------------- --------------- --------------
+  0.7829   0.5396      0.7659          0.7993          0.5571    
+-----------------------------------------------------------------
+
+Результат на тестовой:
+
+-----------------------------------------------------------------
+ Accuracy   Kappa   AccuracyLower   AccuracyUpper   AccuracyNull 
+---------- ------- --------------- --------------- --------------
+  0.6783   0.2952      0.6393          0.7156          0.585     
+-----------------------------------------------------------------
+
+Таким образом, эта модель со сниженной размерностью обладает меньшей точностью, чем первая.
+
+
+
+```{r, include=FALSE}
+preprocessParams2 <- preProcess(trm,
+                                method=c("center", "scale", "pca"), thresh = 0.8)
+
+transformed.main2 <- predict(preprocessParams2, trm)
+transformed.test2 <- predict(preprocessParams2, trt)
+svm_model2pca <- svm(gender~., data = transformed.main2)
+svm.Pred2pca<-predict(svm_model2pca, transformed.main2, probability=FALSE)
+cm<-confusionMatrix(svm.Pred2pca,transformed.main2$gender)
+svm.Pred2pca<-predict(svm_model2pca, transformed.test2, probability=FALSE)
+cm<-confusionMatrix(svm.Pred2pca,transformed.test2$gender)
+```
+Результаты на обучающей выборке:
+
+-----------------------------------------------------------------
+ Accuracy   Kappa   AccuracyLower   AccuracyUpper   AccuracyNull 
+---------- ------- --------------- --------------- --------------
+  0.7692   0.5109      0.7518          0.7859          0.5571    
+-----------------------------------------------------------------
+
+Результаты на тестовой выборке:
+
+-----------------------------------------------------------------
+ Accuracy   Kappa   AccuracyLower   AccuracyUpper   AccuracyNull 
+---------- ------- --------------- --------------- --------------
+  0.6883   0.3179      0.6496          0.7252          0.585     
+-----------------------------------------------------------------
+
+Таким образом, точность модели по сравнению с предыдущей улучшилась, однако все равно хуже, чем изначальный вариант. Использование метода ближайших соседей давало вероятность
+
+```{r, echo=FALSE}
+library("class")
+knn_result_3<-knn(train= select(transformed.main2, -gender), test=select(transformed.test2, -gender),cl=transformed.main2$gender,  k=8)
+cm<-confusionMatrix(knn_result_3,transformed.test2$gender)
+```
+
+-----------------------------------------------------------------
+ Accuracy   Kappa   AccuracyLower   AccuracyUpper   AccuracyNull 
+---------- ------- --------------- --------------- --------------
+  0.655    0.2588      0.6154           0.693          0.585     
+-----------------------------------------------------------------
+
+Метод ближайших соседей также не дал результата лучшего, чем исходная модель.
+В результате будем применять к тестовому массиву данных изначальную модель по методу опорных векторов.
+
+```{r, echo=FALSE, warning=FALSE}
+pred <- transaction_predict[,c(1,3)]
+pred  <- dplyr::group_by(pred, customer_id, mcc_code) %>% dplyr::summarize(n = n())
+pred$mcc_code <- as.factor(pred$mcc_code) 
+predh <- spread(pred, key = mcc_code, value = n)
+predh[is.na(predh)] <- 0
+predh$gender = predict(svm_model, predh, type = "class")
+prediction_final<-dplyr::select(predh,customer_id,gender)
+prediction_final<-dplyr::mutate(prediction_final, probability = 0.5)
+prediction_final<-as.data.frame(prediction_final)
+write.csv2(prediction_final, "sberbank_Pred_Solonin.csv", sep = ";")
+```
